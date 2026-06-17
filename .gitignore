@@ -1,0 +1,25 @@
+# ─── 敏感信息 ───
+.env
+
+# ─── 运行时缓存 ───
+__pycache__/
+*.pyc
+*.pyo
+
+# ─── 输出文件 ───
+output/
+*.html
+
+# ─── 历史/状态记录 ───
+.published_history.json
+.pending_draft.json
+.access_token_cache.json
+
+# ─── 工作环境 ───
+.workbuddy/
+.codebuddy/
+
+# ─── IDE/系统 ───
+.vscode/
+.idea/
+*.log
