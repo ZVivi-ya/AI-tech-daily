@@ -7,6 +7,29 @@ from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ─── 来源权威评分字典 ───
+# 用于聚类合并时选择主来源（分数越高越权威）
+# 不在字典中的来源默认给 50 分
+SOURCE_SCORES = {
+    "量子位": 92,
+    "InfoQ": 91,
+    "36氪": 88,
+    "IT之家": 82,
+    "爱范儿": 79,
+    "钛媒体": 78,
+    "Hugging Face Blog": 76,
+    "少数派": 74,
+    "arXiv AI": 73,
+    "TechCrunch": 69,
+    "Hacker News": 54,
+    "TLDR AI": 52,
+}
+
+
+def _source_score(source_name: str) -> int:
+    """查来源权威评分，未收录来源默认 50 分。"""
+    return SOURCE_SCORES.get(source_name, 50)
+
 
 def cluster_events(news_list: List[Dict]) -> List[Dict]:
     """
@@ -76,8 +99,8 @@ def cluster_events(news_list: List[Dict]) -> List[Dict]:
     for cluster_indices in clusters:
         items = [enriched[i] for i in cluster_indices]
 
-        # 取标题最长的作为主标题（通常信息最全）
-        main_item = max(items, key=lambda x: len(x["title"]))
+        # 取来源权威评分最高的作为主条目，分数相同则选标题更长的
+        main_item = max(items, key=lambda x: (_source_score(x.get("source_name", "")), len(x["title"])))
 
         # 收集所有来源信息（包括完整摘要）
         sources = []
@@ -111,8 +134,8 @@ def cluster_events(news_list: List[Dict]) -> List[Dict]:
             # 单源时取最长的那篇
             merged_summary = max((item.get("summary", "") for item in items), key=len)
 
-        # 选择主来源（第一个作为主来源）
-        primary = unique_sources[0] if unique_sources else {}
+        # 选择主来源（来源权威评分最高的；分数相同则保留第一个）
+        primary = max(unique_sources, key=lambda s: _source_score(s.get("source_name", ""))) if unique_sources else {}
 
         result = {
             "title": main_item["title"],
@@ -133,8 +156,11 @@ def cluster_events(news_list: List[Dict]) -> List[Dict]:
 def _extract_keywords(text: str) -> List[str]:
     """从标题中提取关键实体词（公司名、产品名、核心动词）。"""
     # 中文科技新闻常见的关键词模式
-    # 提取：中文、英文单词、数字
-    words = re.findall(r"[\w\u4e00-\u9fff]+", text)
+    # 提取：中文字词、英文单词、数字（各自独立）
+    # 注：[\w\u4e00-\u9fff]+ 会把 "5遭白宫" 等中英数字混写吞成一个 token，
+    #     导致中文关键词因 token 以数字开头而被 eng/cn 筛选丢弃。
+    #     改用分组表达式确保不同字符类各自独立匹配。
+    words = re.findall(r"[a-zA-Z]+|[0-9]+|[\u4e00-\u9fff]+", text)
 
     # 过滤停用词（只保留真正的虚词）
     STOP_WORDS = {"的", "了", "在", "是", "与", "和", "或", "有",
