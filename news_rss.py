@@ -8,9 +8,9 @@
 
 注：虎嗅、极客公园、机器之心 因RSS不可用/需内测，暂未接入
 """
+import calendar
 import logging
 import re
-import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -144,6 +144,12 @@ EXCLUDE_TITLE_KEYWORDS = [
     "汽车销量", "车企", "新车", " SUV", "轿车", "试驾", "测评",
     "混动", "纯电", "续航", "充电桩", "补能",
     "比亚迪", "特斯拉",
+    # 纯机器人融资/量产（非AI技术突破，除非明确含AI关键词）
+    "人形机器人", "双足机器人", "四足机器人", "机器人融资",
+    "天使轮", "A轮融资", "B轮融资", "C轮融资",
+    "累计融资", "融资数亿", "数亿美元", "成独角兽",
+    # 芯片/硬件（非AI核心，除非明确指AI芯片）
+    "流片", "3D堆叠", "TokenPU", "芯片发布", "芯片流片",
     # 非AI硬件发布（纯手机/耳机/穿戴设备等，不涉及AI技术本身）
     "手机曝光", "手机发布", "手机开售", "真无线", "耳夹式",
     "跑分", "开售", "预售", "售价",
@@ -153,9 +159,12 @@ EXCLUDE_TITLE_KEYWORDS = [
     "YU7 GT", "SU7", "问界", "启境", "启境汽车",
     # 网络安全（非AI技术本身）
     "FBI", "网络攻击", "黑客", "勒索软件", "网络入侵",
-    # 地方产业/招商（非AI技术内容）
+    # 地方产业/招商/政策（非AI技术内容）
     "招商", "产业园", "创新园", "孵化器", "签约", "落户",
     "高质量发展", "产业融合", "产业大会", "数字经济",
+    "印发", "政策措施", "若干措施", "实施方案", "指导意见",
+    # 社会现象/心理/生活方式（非AI核心）
+    "多巴胺", "焦虑", "解压", "心理健康", "心理慰藉",
     # 纯硬件产品（非AI核心）
     "笔记本", "电脑", "显示器", "眼镜", "XR", "AR",
     "相机", "云台", "镜头", "传感器",
@@ -367,8 +376,9 @@ def _parse_date(entry) -> datetime:
     try:
         tp = entry.get("published_parsed")
         if tp:
-            # published_parsed 是 UTC 时间
-            return datetime.fromtimestamp(_time.mktime(tp), tz=timezone.utc).astimezone(CST)
+            # published_parsed 是 UTC 时间，用 calendar.timegm 正确转换
+            utc_dt = datetime.fromtimestamp(calendar.timegm(tp), tz=timezone.utc)
+            return utc_dt.astimezone(CST)
     except Exception:
         pass
     # 回退：尝试常见日期格式
@@ -419,14 +429,20 @@ def _parse_date_str(date_str: str) -> datetime:
 
 
 def _format_published(dt: datetime) -> str:
-    """格式化发布时间。只有实际解析出具体时间才显示时:分，否则只显示日期。"""
+    """格式化发布时间。防止时区转换导致未来日期（UTC晚于16:00→CST次日）。"""
     if dt is None:
         return ""
-    # 有时分秒信息 → 显示完整时间
-    if dt.hour != 0 or dt.minute != 0 or dt.second != 0:
-        return dt.strftime("%Y-%m-%d %H:%M")
-    # 时间是 00:00（纯日期解析）→ 不显示时间，避免 fake "0点"
-    return dt.strftime("%Y-%m-%d")
+    now_cst = datetime.now(CST)
+    # 如果转换后的日期 > 今天 -> 显示"今天"
+    if dt.date() > now_cst.date():
+        if dt.minute == 0:
+            return now_cst.strftime("%Y-%m-%d")
+        return now_cst.strftime("%Y-%m-%d %H:%M")
+    # 整点时间（如 04:00, 08:00, 00:00）→ 只显示日期
+    if dt.minute == 0:
+        return dt.strftime("%Y-%m-%d")
+    # 有具体分钟信息 → 显示完整时间
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _clean_html(text: str) -> str:

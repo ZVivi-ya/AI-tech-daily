@@ -2,6 +2,7 @@
 微信图文 HTML 生成器 —— 生成类似"8点1氪"风格的早报图文内容
 """
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -64,8 +65,8 @@ def _build_news_card(i: int, item: dict) -> str:
             f'来源：{source_name} ｜ 详情请查看原文：{url_display}</p>'
         )
 
-    # summary（整段自然语言描述）
-    summary_escaped = _escape_html(raw_summary)
+    # summary：按空行拆分为多个段落，清理标记符号
+    summary_paragraphs = _build_summary_paragraphs(raw_summary)
 
     return f"""\
     <section style="padding: 16px 20px; border-bottom: 1px solid #f0f0f0;">
@@ -74,7 +75,7 @@ def _build_news_card(i: int, item: dict) -> str:
         <section style="flex: 1; min-width: 0;">
           <p style="font-size: 15px; font-weight: bold; color: #333; margin: 0 0 6px 0; line-height: 1.5;">{title}</p>
           <p style="margin: 0 0 6px 0;">{company_badge}{time_badge}</p>
-          <p style="font-size: 13px; color: #444; margin: 0 0 8px 0; line-height: 1.7;">{summary_escaped}</p>
+          {summary_paragraphs}
           {ref_html}
         </section>
       </section>
@@ -166,6 +167,32 @@ def save_preview_html(news_list: List[Dict[str, Any]]) -> str:
     out_path.write_text(full_html, encoding="utf-8-sig")  # utf-8-sig 加 BOM，避免 Windows 下浏览器用 GBK 解析导致乱码
     logger.info("[formatter] 预览文件已保存: %s", out_path)
     return str(out_path)
+
+
+def _build_summary_paragraphs(raw: str) -> str:
+    """将摘要按段落拆分，清理标记符号，每个段落独立<p>。"""
+    if not raw:
+        return ""
+    # 按空行拆分段落
+    paragraphs = re.split(r'\n\s*\n', raw.strip())
+    html_parts = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        # 清理：去掉 ** 标记（保留文字）
+        para = re.sub(r'\*\*(.*?)\*\*', r'\1', para)
+        # 清理：去掉 ❓ 符号
+        para = para.replace('❓', '')
+        # 转义HTML
+        para = _escape_html(para)
+        # 每个段落一个 <p>
+        html_parts.append(
+            f'<p style="font-size: 13px; color: #444; margin: 0 0 6px 0; line-height: 1.7;">{para}</p>'
+        )
+    if not html_parts:
+        return ""
+    return '\n          '.join(html_parts)
 
 
 def _escape_html(text: str) -> str:

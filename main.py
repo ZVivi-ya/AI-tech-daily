@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -109,16 +109,44 @@ def _load_published_history() -> Set[str]:
 
 
 def _save_published_history(news_list: List[Dict]):
-    """保存本次发布的所有新闻的文章ID到历史记录文件。"""
+    """保存本次发布的所有新闻的文章ID和最近7天完整信息到历史记录文件。"""
     existing = _load_published_history()
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
     for n in news_list:
         url = n.get("source_url", "")
         aid = _extract_article_id(url)
         if aid:
             existing.add(aid)
+
+    # 加载已有完整记录，追加本次新发布的完整新闻（含标题/摘要/公司/日期）
+    old_data = {}
+    if PUBLISHED_HISTORY_FILE.exists():
+        try:
+            old_data = json.loads(PUBLISHED_HISTORY_FILE.read_text("utf-8"))
+        except (json.JSONDecodeError, KeyError, OSError):
+            old_data = {}
+
+    recent = old_data.get("recent_news", [])
+    for n in news_list:
+        recent.append({
+            "title": n.get("title", ""),
+            "summary": n.get("summary", ""),
+            "company": n.get("company", ""),
+            "published_at": n.get("published_at", today),
+            "source_url": n.get("source_url", ""),
+            "source_name": n.get("source_name", ""),
+        })
+
+    # 仅保留最近7天的完整记录，防止文件膨胀
+    cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    recent = [r for r in recent if r.get("published_at", "")[:10] >= cutoff]
+
     data = {
         "article_ids": sorted(existing),
-        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "recent_news": recent,
+        "last_updated": now.strftime("%Y-%m-%d %H:%M:%S"),
     }
     PUBLISHED_HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
     logger.info("[历史] 已保存 %d 条历史记录", len(existing))
@@ -139,6 +167,186 @@ def _filter_published(news_list: List[Dict], published_ids: Set[str]) -> List[Di
         logger.info("[历史] 剔除 %d 条已发布过的新闻（含标题: %s）",
                      removed, [n.get("title","")[:20] for n in news_list if _extract_article_id(n.get("source_url","")) in published_ids])
     return filtered
+
+
+def load_recent_published(days: int = 2) -> List[Dict]:
+    """加载最近 N 天内已发布的新闻完整信息（标题、摘要、公司名、发布日期）。
+
+    从 .published_history.json 的 recent_news 数组中读取，
+    按 published_at 筛选最近 N 天。文件不存在或格式不兼容时返回空列表。
+
+    Args:
+        days: 回溯天数，默认 2 天
+
+    Returns:
+        [{title, summary, company, published_at, source_url, source_name}, ...]
+    """
+    if not PUBLISHED_HISTORY_FILE.exists():
+        return []
+
+    try:
+        data = json.loads(PUBLISHED_HISTORY_FILE.read_text("utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("[历史] 历史文件无法解析，load_recent_published 返回空")
+        return []
+
+    recent = data.get("recent_news", [])
+    if not recent:
+        return []
+
+    now = datetime.now()
+    cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    result = []
+    for item in recent:
+        pub = item.get("published_at", "")
+        if pub[:10] >= cutoff:
+            result.append({
+                "title": item.get("title", ""),
+                "summary": item.get("summary", ""),
+                "company": item.get("company", ""),
+                "published_at": pub[:10],          # 只保留日期部分
+                "source_url": item.get("source_url", ""),
+                "source_name": item.get("source_name", ""),
+            })
+
+    logger.info("[历史] load_recent_published(days=%d): %d 条", days, len(result))
+    return result
+
+
+# ─── 事件追踪标记 ───
+
+# 常见事件关键词，用于从历史标题中提取2-4字事件名
+_TRACKING_EVENT_KEYWORDS = [
+    "收购", "下架", "融资", "上线", "开源", "起诉", "裁员",
+    "人事", "监管", "调查", "产品", "合作", "投资", "上市", "召回",
+    "漏洞", "攻击", "演示", "预览", "更新", "推出", "发布",
+    "合并", "拆分", "关停", "封禁", "禁令", "罚款", "获批",
+    "警告", "谈判", "和解",
+]
+
+
+def _lcs_length(a: str, b: str) -> int:
+    """计算两个字符串的最长公共子序列长度（动态规划，空间优化为 O(min(m,n))）。"""
+    if not a or not b:
+        return 0
+    # 确保 a 是较短的
+    if len(a) > len(b):
+        a, b = b, a
+    m, n = len(a), len(b)
+    prev = [0] * (m + 1)
+    for j in range(1, n + 1):
+        curr = [0] * (m + 1)
+        for i in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                curr[i] = prev[i - 1] + 1
+            else:
+                curr[i] = max(prev[i], curr[i - 1])
+        prev = curr
+    return prev[m]
+
+
+def _title_similarity(text1: str, text2: str) -> float:
+    """计算两个新闻标题的相似度。
+
+    使用最长公共子序列 (LCS) 归一化：LCS 长度 / 两标题平均长度。
+    该指标适合"同一事件不同角度"的标题对——前半共用公司名+产品名，
+    后半不同细节时仍能给出合理分数。
+    """
+    if not text1 or not text2:
+        return 0.0
+    lcs = _lcs_length(text1, text2)
+    avg_len = (len(text1) + len(text2)) / 2.0
+    return lcs / avg_len if avg_len > 0 else 0.0
+
+
+def _extract_event_keyword(history_title: str) -> str:
+    """从历史标题中提取2-3字事件关键词。
+
+    优先匹配内置事件关键词列表；未命中时取标题后半段较长的2字片段。
+    """
+    for kw in _TRACKING_EVENT_KEYWORDS:
+        if kw in history_title:
+            return kw
+    # 回退：取标题末尾区域中第一个非标点的2字片段
+    # 去除常见标点后切2字窗口
+    clean = history_title.replace("：", "").replace("，", "").replace(" ", "")
+    # 从后往前扫，找一个像事件关键词的2-3字片段
+    for i in range(len(clean) - 1, 1, -1):
+        seg = clean[i - 2:i + 1]  # 3-gram
+        if len(seg) >= 2:
+            return seg[:3]
+    return "事件"
+
+
+def mark_tracking_news(news_list: List[Dict],
+                       recent_history: List[Dict]) -> List[Dict]:
+    """对每条新闻检查是否与近期历史中的事件重复，并在原地标记追踪信息。
+
+    检查逻辑：
+    1. company 字段与历史记录中的某条一致（忽略大小写）
+    2. 标题关键词重叠度 > 60%（基于 tokenize 后的集合交集/较小集）
+
+    匹配成功后为该条新闻新增两个字段：
+    - is_tracking: bool
+    - tracking_title: "【追踪·{事件名}】{原标题}"
+    未匹配时：is_tracking=False，不添加 tracking_title。
+
+    Args:
+        news_list: 当前待发布的新闻列表（原地修改）
+        recent_history: load_recent_published 的输出结果
+
+    Returns:
+        修改后的 news_list（与原列表同一个对象）
+    """
+    if not recent_history:
+        logger.info("[追踪] recent_history 为空，跳过标记")
+        for n in news_list:
+            n["is_tracking"] = False
+        return news_list
+
+    tracking_count = 0
+    for news in news_list:
+        company = (news.get("company", "") or "").strip().lower()
+        title = (news.get("title", "") or "").strip()
+
+        if not company:
+            news["is_tracking"] = False
+            continue
+
+        matched = False
+        event_name = "事件"
+
+        for hist in recent_history:
+            hist_company = (hist.get("company", "") or "").strip().lower()
+            hist_title = (hist.get("title", "") or "").strip()
+
+            if not hist_company or not hist_title:
+                continue
+
+            # 公司名匹配（忽略大小写，支持双向包含匹配如 "Apple" vs "Apple Inc."）
+            if company != hist_company:
+                if company not in hist_company and hist_company not in company:
+                    continue
+
+            # 标题相似度
+            sim = _title_similarity(title, hist_title)
+            if sim > 0.60:
+                matched = True
+                event_name = _extract_event_keyword(hist_title)
+                logger.info("[追踪] 匹配: 「%s」↔ 历史「%s」, sim=%.2f, 事件=%s",
+                            title[:30], hist_title[:30], sim, event_name)
+                break
+
+        if matched:
+            news["is_tracking"] = True
+            news["tracking_title"] = f"【追踪·{event_name}】{title}"
+            tracking_count += 1
+        else:
+            news["is_tracking"] = False
+
+    logger.info("[追踪] 标记完成: %d/%d 条为追踪新闻", tracking_count, len(news_list))
+    return news_list
 
 
 def main():
@@ -190,9 +398,13 @@ def main():
         clustered = cluster_events(ai_news)
         logger.info("[main] 聚类为 %d 个事件", len(clustered))
 
+        # 事件追踪标记：基于近期已发布历史，标记 is_tracking / tracking_title
+        recent_history = load_recent_published(days=2)
+        clustered_for_rewrite = mark_tracking_news(clustered[:30], recent_history)
+
         # LLM 多源融合改写（取前 30 个事件，争取更多输出）
         logger.info("[main] Step 3: LLM 多源融合改写 ...")
-        news_list = rewrite_news(clustered[:30])
+        news_list = rewrite_news(clustered_for_rewrite)
         logger.info("[main] 改写完成，共 %d 条", len(news_list))
 
         # 检查来源多样性
